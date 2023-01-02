@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch.nn.functional as F
 from torch import Tensor
@@ -7,7 +7,7 @@ from torch_sparse import SparseTensor
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
 from torch_geometric.nn.dense.linear import Linear
-from torch_geometric.typing import Adj, OptTensor
+from torch_geometric.typing import Adj, OptPairTensor, OptTensor
 
 
 class FAConv(MessagePassing):
@@ -62,7 +62,7 @@ class FAConv(MessagePassing):
           :math:`((|\mathcal{V}|, F), ((2, |\mathcal{E}|),
           (|\mathcal{E}|)))` if :obj:`return_attention_weights=True`
     """
-    _cached_edge_index: Optional[Tuple[Tensor, Tensor]]
+    _cached_edge_index: Optional[OptPairTensor]
     _cached_adj_t: Optional[SparseTensor]
     _alpha: OptTensor
 
@@ -149,7 +149,7 @@ class FAConv(MessagePassing):
         self._alpha = None
 
         if self.eps != 0.0:
-            out += self.eps * x_0
+            out = out + self.eps * x_0
 
         if isinstance(return_attention_weights, bool):
             assert alpha is not None

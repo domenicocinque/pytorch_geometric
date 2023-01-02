@@ -1,12 +1,13 @@
-from typing import List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from torch import Tensor
-from torch.nn import ModuleList, ReLU, Sequential
+from torch.nn import ModuleList, Sequential
 
 from torch_geometric.nn.aggr import DegreeScalerAggregation
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.nn.resolver import activation_resolver
 from torch_geometric.typing import Adj, OptTensor
 from torch_geometric.utils import degree
 
@@ -70,6 +71,13 @@ class PNAConv(MessagePassing):
             aggregation (default: :obj:`1`).
         divide_input (bool, optional): Whether the input features should
             be split between towers or not (default: :obj:`False`).
+        act (str or Callable, optional): Pre- and post-layer activation
+            function to use. (default: :obj:`"relu"`)
+        act_kwargs (Dict[str, Any], optional): Arguments passed to the
+            respective activation function defined by :obj:`act`.
+            (default: :obj:`None`)
+        train_norm (bool, optional) Whether normalization parameters
+            are trainable. (default: :obj:`False`)
         **kwargs (optional): Additional arguments of
             :class:`torch_geometric.nn.conv.MessagePassing`.
 
@@ -80,13 +88,25 @@ class PNAConv(MessagePassing):
           edge features :math:`(|\mathcal{E}|, D)` *(optional)*
         - **output:** node features :math:`(|\mathcal{V}|, F_{out})`
     """
-    def __init__(self, in_channels: int, out_channels: int,
-                 aggregators: List[str], scalers: List[str], deg: Tensor,
-                 edge_dim: Optional[int] = None, towers: int = 1,
-                 pre_layers: int = 1, post_layers: int = 1,
-                 divide_input: bool = False, **kwargs):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        aggregators: List[str],
+        scalers: List[str],
+        deg: Tensor,
+        edge_dim: Optional[int] = None,
+        towers: int = 1,
+        pre_layers: int = 1,
+        post_layers: int = 1,
+        divide_input: bool = False,
+        act: Union[str, Callable, None] = "relu",
+        act_kwargs: Optional[Dict[str, Any]] = None,
+        train_norm: bool = False,
+        **kwargs,
+    ):
 
-        aggr = DegreeScalerAggregation(aggregators, scalers, deg)
+        aggr = DegreeScalerAggregation(aggregators, scalers, deg, train_norm)
         super().__init__(aggr=aggr, node_dim=0, **kwargs)
 
         if divide_input:
@@ -110,14 +130,14 @@ class PNAConv(MessagePassing):
         for _ in range(towers):
             modules = [Linear((3 if edge_dim else 2) * self.F_in, self.F_in)]
             for _ in range(pre_layers - 1):
-                modules += [ReLU()]
+                modules += [activation_resolver(act, **(act_kwargs or {}))]
                 modules += [Linear(self.F_in, self.F_in)]
             self.pre_nns.append(Sequential(*modules))
 
             in_channels = (len(aggregators) * len(scalers) + 1) * self.F_in
             modules = [Linear(in_channels, self.F_out)]
             for _ in range(post_layers - 1):
-                modules += [ReLU()]
+                modules += [activation_resolver(act, **(act_kwargs or {}))]
                 modules += [Linear(self.F_out, self.F_out)]
             self.post_nns.append(Sequential(*modules))
 

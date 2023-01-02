@@ -1,11 +1,11 @@
 import copy
+import warnings
 from collections.abc import Mapping, Sequence
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-import torch
 from torch import Tensor
 
-from torch_geometric.data import Data
+from torch_geometric.data import Batch, Data
 from torch_geometric.data.collate import collate
 from torch_geometric.data.dataset import Dataset, IndexType
 from torch_geometric.data.separate import separate
@@ -34,6 +34,8 @@ class InMemoryDataset(Dataset):
             :obj:`torch_geometric.data.Data` object and returns a boolean
             value, indicating whether the data object should be included in the
             final dataset. (default: :obj:`None`)
+        log (bool, optional): Whether to print any console output while
+            downloading and processing the dataset. (default: :obj:`True`)
     """
     @property
     def raw_file_names(self) -> Union[str, List[str], Tuple]:
@@ -43,27 +45,24 @@ class InMemoryDataset(Dataset):
     def processed_file_names(self) -> Union[str, List[str], Tuple]:
         raise NotImplementedError
 
-    def __init__(self, root: Optional[str] = None,
-                 transform: Optional[Callable] = None,
-                 pre_transform: Optional[Callable] = None,
-                 pre_filter: Optional[Callable] = None):
-        super().__init__(root, transform, pre_transform, pre_filter)
-        self.data = None
+    def __init__(
+        self,
+        root: Optional[str] = None,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None,
+        log: bool = True,
+    ):
+        super().__init__(root, transform, pre_transform, pre_filter, log)
+        self._data = None
         self.slices = None
         self._data_list: Optional[List[Data]] = None
 
     @property
     def num_classes(self) -> int:
-        r"""Returns the number of classes in the dataset."""
-        y = self.data.y
-        if y is None:
-            return 0
-        elif y.numel() == y.size(0) and not torch.is_floating_point(y):
-            return int(self.data.y.max()) + 1
-        elif y.numel() == y.size(0) and torch.is_floating_point(y):
-            return torch.unique(y).numel()
-        else:
-            return self.data.y.size(-1)
+        if self.transform is None:
+            return self._infer_num_classes(self._data.y)
+        return super().num_classes
 
     def len(self) -> int:
         if self.slices is None:
@@ -74,7 +73,7 @@ class InMemoryDataset(Dataset):
 
     def get(self, idx: int) -> Data:
         if self.len() == 1:
-            return copy.copy(self.data)
+            return copy.copy(self._data)
 
         if not hasattr(self, '_data_list') or self._data_list is None:
             self._data_list = self.len() * [None]
@@ -82,8 +81,8 @@ class InMemoryDataset(Dataset):
             return copy.copy(self._data_list[idx])
 
         data = separate(
-            cls=self.data.__class__,
-            batch=self.data,
+            cls=self._data.__class__,
+            batch=self._data,
             idx=idx,
             slice_dict=self.slices,
             decrement=False,
@@ -128,6 +127,32 @@ class InMemoryDataset(Dataset):
         dataset._data_list = None
         dataset.data, dataset.slices = self.collate(data_list)
         return dataset
+
+    @property
+    def data(self) -> Any:
+        warnings.warn("It is not recommended to directly access the internal "
+                      "storage format `data` of an 'InMemoryDataset'. If you "
+                      "are absolutely certain what you are doing, access the "
+                      "internal storage via `InMemoryDataset._data` instead. "
+                      "Alternatively, you can access stacked individual "
+                      "attributes of every graph via `dataset.{attr_name}`.")
+        return self._data
+
+    @data.setter
+    def data(self, value: Any):
+        self._data = value
+
+    def __getattr__(self, key: str) -> Any:
+        data = self.__dict__.get('_data')
+        if isinstance(data, Data) and key in data:
+            if self._indices is None and data.__inc__(key, data[key]) == 0:
+                return data[key]
+            else:
+                data_list = [self.get(i) for i in self.indices()]
+                return Batch.from_data_list(data_list)[key]
+
+        raise AttributeError(f"'{self.__class__.__name__}' object has no "
+                             f"attribute '{key}'")
 
 
 def nested_iter(node: Union[Mapping, Sequence]) -> Iterable:

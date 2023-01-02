@@ -225,7 +225,33 @@ Models
 .. automodule:: torch_geometric.nn.models
    :members:
    :undoc-members:
-   :exclude-members: message, aggregate, message_and_aggregate, update, MessagePassing, training, init_conv
+   :exclude-members: message, aggregate, message_and_aggregate, update, MessagePassing, training, init_conv, Explainer
+
+KGE Models
+----------
+
+.. currentmodule:: torch_geometric.nn.kge
+
+.. autosummary::
+   :nosignatures:
+   {% for cls in torch_geometric.nn.kge.classes %}
+     {{ cls }}
+   {% endfor %}
+
+.. autoclass:: torch_geometric.nn.kge.KGEModel
+   :members:
+
+.. automodule:: torch_geometric.nn.kge
+   :members:
+   :exclude-members: KGEModel, loss
+
+Encodings
+---------
+
+.. automodule:: torch_geometric.nn.encoding
+   :members:
+   :undoc-members:
+   :exclude-members: training
 
 Functional
 ----------
@@ -295,3 +321,9 @@ DataParallel Layers
    :members:
    :undoc-members:
    :exclude-members: training
+
+
+Model Summary
+-------------
+
+.. autofunction:: torch_geometric.nn.summary.summary

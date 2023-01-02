@@ -32,7 +32,7 @@ class Aggregation(torch.nn.Module):
        # Assign each element to one of three sets:
        index = torch.tensor([0, 0, 1, 0, 2, 0, 2, 1, 0, 2])
 
-       output = aggr(x, index)  #  Output shape: [4, 64]
+       output = aggr(x, index)  #  Output shape: [3, 64]
 
     Alternatively, aggregation can be achieved via a "compressed" index vector
     called :obj:`ptr`. Here, elements within the same set need to be grouped
@@ -103,15 +103,18 @@ class Aggregation(torch.nn.Module):
                                  f"'{dim_size}' but expected "
                                  f"'{ptr.numel() - 1}')")
 
-        if index is not None:
-            if dim_size is None:
-                dim_size = int(index.max()) + 1 if index.numel() > 0 else 0
-            elif index.numel() > 0 and dim_size <= int(index.max()):
-                raise ValueError(f"Encountered invalid 'dim_size' (got "
-                                 f"'{dim_size}' but expected "
-                                 f">= '{int(index.max()) + 1}')")
+        if index is not None and dim_size is None:
+            dim_size = int(index.max()) + 1 if index.numel() > 0 else 0
 
-        return super().__call__(x, index, ptr, dim_size, dim, **kwargs)
+        try:
+            return super().__call__(x, index, ptr, dim_size, dim, **kwargs)
+        except (IndexError, RuntimeError) as e:
+            if index is not None:
+                if index.numel() > 0 and dim_size <= int(index.max()):
+                    raise ValueError(f"Encountered invalid 'dim_size' (got "
+                                     f"'{dim_size}' but expected "
+                                     f">= '{int(index.max()) + 1}')")
+            raise e
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}()'
@@ -143,14 +146,14 @@ class Aggregation(torch.nn.Module):
 
     def reduce(self, x: Tensor, index: Optional[Tensor] = None,
                ptr: Optional[Tensor] = None, dim_size: Optional[int] = None,
-               dim: int = -2, reduce: str = 'add') -> Tensor:
+               dim: int = -2, reduce: str = 'sum') -> Tensor:
 
         if ptr is not None:
             ptr = expand_left(ptr, dim, dims=x.dim())
             return segment_csr(x, ptr, reduce=reduce)
 
         assert index is not None
-        return scatter(x, index, dim=dim, dim_size=dim_size, reduce=reduce)
+        return scatter(x, index, dim, dim_size, reduce)
 
     def to_dense_batch(self, x: Tensor, index: Optional[Tensor] = None,
                        ptr: Optional[Tensor] = None,

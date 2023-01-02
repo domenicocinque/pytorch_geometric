@@ -26,6 +26,7 @@ from torch_sparse import SparseTensor
 from torch_geometric.nn.aggr import Aggregation, MultiAggregation
 from torch_geometric.nn.resolver import aggregation_resolver as aggr_resolver
 from torch_geometric.typing import Adj, Size
+from torch_geometric.utils import is_sparse, is_torch_sparse_tensor
 
 from .utils.helpers import expand_left
 from .utils.inspector import Inspector, func_body_repr, func_header_repr
@@ -182,10 +183,24 @@ class MessagePassing(torch.nn.Module):
     def __check_input__(self, edge_index, size):
         the_size: List[Optional[int]] = [None, None]
 
-        if isinstance(edge_index, Tensor):
-            if not edge_index.dtype == torch.long:
-                raise ValueError(f"Expected 'edge_index' to be of type "
-                                 f"'torch.long' (got '{edge_index.dtype}')")
+        if is_sparse(edge_index):
+            if self.flow == 'target_to_source':
+                raise ValueError(
+                    ('Flow direction "target_to_source" is invalid for '
+                     'message propagation via `torch_sparse.SparseTensor` '
+                     'or `torch.sparse.Tensor`. If you really want to make '
+                     'use of a reverse message passing flow, pass in the '
+                     'transposed sparse tensor to the message passing module, '
+                     'e.g., `adj_t.t()`.'))
+            the_size[0] = edge_index.size(1)
+            the_size[1] = edge_index.size(0)
+            return the_size
+        elif isinstance(edge_index, Tensor):
+            int_dtypes = (torch.uint8, torch.int8, torch.int32, torch.int64)
+
+            if edge_index.dtype not in int_dtypes:
+                raise ValueError(f"Expected 'edge_index' to be of integer "
+                                 f"type (got '{edge_index.dtype}')")
             if edge_index.dim() != 2:
                 raise ValueError(f"Expected 'edge_index' to be two-dimensional"
                                  f" (got {edge_index.dim()} dimensions)")
@@ -198,22 +213,10 @@ class MessagePassing(torch.nn.Module):
                 the_size[1] = size[1]
             return the_size
 
-        elif isinstance(edge_index, SparseTensor):
-            if self.flow == 'target_to_source':
-                raise ValueError(
-                    ('Flow direction "target_to_source" is invalid for '
-                     'message propagation via `torch_sparse.SparseTensor`. If '
-                     'you really want to make use of a reverse message '
-                     'passing flow, pass in the transposed sparse tensor to '
-                     'the message passing module, e.g., `adj_t.t()`.'))
-            the_size[0] = edge_index.sparse_size(1)
-            the_size[1] = edge_index.sparse_size(0)
-            return the_size
-
         raise ValueError(
-            ('`MessagePassing.propagate` only supports `torch.LongTensor` of '
-             'shape `[2, num_messages]` or `torch_sparse.SparseTensor` for '
-             'argument `edge_index`.'))
+            ('`MessagePassing.propagate` only supports integer tensors of '
+             'shape `[2, num_messages]`, `torch_sparse.SparseTensor` or '
+             '`torch.sparse.Tensor` for argument `edge_index`.'))
 
     def __set_size__(self, size: List[Optional[int]], dim: int, src: Tensor):
         the_size = size[dim]
@@ -225,9 +228,43 @@ class MessagePassing(torch.nn.Module):
                  f'dimension {self.node_dim}, but expected size {the_size}.'))
 
     def __lift__(self, src, edge_index, dim):
-        if isinstance(edge_index, Tensor):
-            index = edge_index[dim]
+        if is_torch_sparse_tensor(edge_index):
+            assert dim == 0 or dim == 1
+            index = edge_index._indices()[1 - dim]
             return src.index_select(self.node_dim, index)
+
+        elif isinstance(edge_index, Tensor):
+            try:
+                index = edge_index[dim]
+                return src.index_select(self.node_dim, index)
+            except (IndexError, RuntimeError) as e:
+                if 'CUDA' in str(e):
+                    raise ValueError(
+                        f"Encountered a CUDA error. Please ensure that all "
+                        f"indices in 'edge_index' point to valid indices "
+                        f"in the interval [0, {src.size(self.node_dim)}) in "
+                        f"your node feature matrix and try again.")
+
+                if index.numel() > 0 and index.min() < 0:
+                    raise ValueError(
+                        f"Found negative indices in 'edge_index' (got "
+                        f"{index.min().item()}). Please ensure that all "
+                        f"indices in 'edge_index' point to valid indices "
+                        f"in the interval [0, {src.size(self.node_dim)}) in "
+                        f"your node feature matrix and try again.")
+
+                if (index.numel() > 0
+                        and index.max() >= src.size(self.node_dim)):
+                    raise ValueError(
+                        f"Found indices in 'edge_index' that are larger "
+                        f"than {src.size(self.node_dim) - 1} (got "
+                        f"{index.max().item()}). Please ensure that all "
+                        f"indices in 'edge_index' point to valid indices "
+                        f"in the interval [0, {src.size(self.node_dim)}) in "
+                        f"your node feature matrix and try again.")
+
+                raise e
+
         elif isinstance(edge_index, SparseTensor):
             if dim == 1:
                 rowptr = edge_index.storage.rowptr()
@@ -236,7 +273,11 @@ class MessagePassing(torch.nn.Module):
             elif dim == 0:
                 col = edge_index.storage.col()
                 return src.index_select(self.node_dim, col)
-        raise ValueError
+
+        raise ValueError(
+            ('`MessagePassing.propagate` only supports integer tensors of '
+             'shape `[2, num_messages]`, `torch_sparse.SparseTensor` '
+             'or `torch.sparse.Tensor` for argument `edge_index`.'))
 
     def __collect__(self, args, edge_index, size, kwargs):
         i, j = (1, 0) if self.flow == 'source_to_target' else (0, 1)
@@ -261,12 +302,33 @@ class MessagePassing(torch.nn.Module):
 
                 out[arg] = data
 
-        if isinstance(edge_index, Tensor):
+        if is_torch_sparse_tensor(edge_index):
+            if edge_index.requires_grad:
+                edge_index = edge_index.coalesce()
+                indices = edge_index.indices()
+                values = edge_index.values()
+            else:
+                indices = edge_index._indices()
+                values = edge_index._values()
+            out['adj_t'] = edge_index
+            out['edge_index'] = None
+            out['edge_index_i'] = indices[0]
+            out['edge_index_j'] = indices[1]
+            out['ptr'] = None  # TODO Get `rowptr` from CSR representation.
+            if out.get('edge_weight', None) is None:
+                out['edge_weight'] = values
+            if out.get('edge_attr', None) is None:
+                out['edge_attr'] = values
+            if out.get('edge_type', None) is None:
+                out['edge_type'] = values
+
+        elif isinstance(edge_index, Tensor):
             out['adj_t'] = None
             out['edge_index'] = edge_index
             out['edge_index_i'] = edge_index[i]
             out['edge_index_j'] = edge_index[j]
             out['ptr'] = None
+
         elif isinstance(edge_index, SparseTensor):
             out['adj_t'] = edge_index
             out['edge_index'] = None
@@ -292,8 +354,9 @@ class MessagePassing(torch.nn.Module):
         r"""The initial call to start propagating messages.
 
         Args:
-            edge_index (Tensor or SparseTensor): A :obj:`torch.LongTensor` or a
-                :obj:`torch_sparse.SparseTensor` that defines the underlying
+            edge_index (Tensor or SparseTensor): A :obj:`torch.LongTensor`, a
+                :obj:`torch_sparse.SparseTensor` or a
+                :obj:`torch.sparse.Tensor` that defines the underlying
                 graph connectivity/message passing flow.
                 :obj:`edge_index` holds the indices of a general (sparse)
                 assignment matrix of shape :obj:`[N, M]`.
@@ -303,9 +366,9 @@ class MessagePassing(torch.nn.Module):
                 nodes in :obj:`edge_index[1]`
                 (in case :obj:`flow="source_to_target"`).
                 If :obj:`edge_index` is of type
-                :obj:`torch_sparse.SparseTensor`, its sparse indices
-                :obj:`(row, col)` should relate to :obj:`row = edge_index[1]`
-                and :obj:`col = edge_index[0]`.
+                :obj:`torch_sparse.SparseTensor` or :obj:`torch.sparse.Tensor`,
+                its sparse indices :obj:`(row, col)` should relate to
+                :obj:`row = edge_index[1]` and :obj:`col = edge_index[0]`.
                 The major difference between both formats is that we need to
                 input the *transposed* sparse adjacency matrix into
                 :func:`propagate`.
@@ -314,7 +377,8 @@ class MessagePassing(torch.nn.Module):
                 If set to :obj:`None`, the size will be automatically inferred
                 and assumed to be quadratic.
                 This argument is ignored in case :obj:`edge_index` is a
-                :obj:`torch_sparse.SparseTensor`. (default: :obj:`None`)
+                :obj:`torch_sparse.SparseTensor` or
+                a :obj:`torch.sparse.Tensor`. (default: :obj:`None`)
             **kwargs: Any additional data which is needed to construct and
                 aggregate messages, and to update node embeddings.
         """
@@ -328,8 +392,7 @@ class MessagePassing(torch.nn.Module):
         size = self.__check_input__(edge_index, size)
 
         # Run "fused" message and aggregation (if applicable).
-        if (isinstance(edge_index, SparseTensor) and self.fuse
-                and not self.explain):
+        if is_sparse(edge_index) and self.fuse and not self.explain:
             coll_dict = self.__collect__(self.__fused_user_args__, edge_index,
                                          size, kwargs)
 
@@ -416,8 +479,9 @@ class MessagePassing(torch.nn.Module):
         graph.
 
         Args:
-            edge_index (Tensor or SparseTensor): A :obj:`torch.LongTensor` or a
-                :obj:`torch_sparse.SparseTensor` that defines the underlying
+            edge_index (Tensor or SparseTensor): A :obj:`torch.LongTensor`, a
+                :obj:`torch_sparse.SparseTensor` or
+                a :obj:`torch.sparse.Tensor` that defines the underlying
                 graph connectivity/message passing flow.
                 See :meth:`propagate` for more information.
             **kwargs: Any additional data which is needed to compute or update
@@ -514,13 +578,17 @@ class MessagePassing(torch.nn.Module):
         return self.aggr_module(inputs, index, ptr=ptr, dim_size=dim_size,
                                 dim=self.node_dim)
 
-    def message_and_aggregate(self, adj_t: SparseTensor) -> Tensor:
+    def message_and_aggregate(
+        self,
+        adj_t: Union[SparseTensor, Tensor],
+    ) -> Tensor:
         r"""Fuses computations of :func:`message` and :func:`aggregate` into a
         single function.
         If applicable, this saves both time and memory since messages do not
         explicitly need to be materialized.
         This function will only gets called in case it is implemented and
-        propagation takes place based on a :obj:`torch_sparse.SparseTensor`.
+        propagation takes place based on a :obj:`torch_sparse.SparseTensor`
+        or a :obj:`torch.sparse.Tensor`.
         """
         raise NotImplementedError
 
@@ -672,7 +740,7 @@ class MessagePassing(torch.nn.Module):
         return handle
 
     @torch.jit.unused
-    def jittable(self, typing: Optional[str] = None):
+    def jittable(self, typing: Optional[str] = None) -> 'MessagePassing':
         r"""Analyzes the :class:`MessagePassing` instance and produces a new
         jittable module.
 
@@ -794,7 +862,6 @@ class MessagePassing(torch.nn.Module):
             edge_updater_types=edge_updater_types,
             edge_updater_return_type=edge_updater_return_type,
             check_input=inspect.getsource(self.__check_input__)[:-1],
-            lift=inspect.getsource(self.__lift__)[:-1],
         )
         # Instantiate a class from the rendered JIT module representation.
         cls = class_from_module_repr(cls_name, jit_module_repr)

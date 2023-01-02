@@ -5,7 +5,8 @@ from typing import Optional
 
 import torch
 import torch.utils.data
-from torch_sparse import SparseTensor, cat
+
+from torch_geometric.typing import SparseTensor
 
 
 class ClusterData(torch.utils.data.Dataset):
@@ -13,6 +14,9 @@ class ClusterData(torch.utils.data.Dataset):
     motivated by the `"Cluster-GCN: An Efficient Algorithm for Training Deep
     and Large Graph Convolutional Networks"
     <https://arxiv.org/abs/1905.07953>`_ paper.
+
+    .. note::
+        The underlying METIS algorithm requires undirected graphs as input.
 
     Args:
         data (torch_geometric.data.Data): The graph data object.
@@ -137,6 +141,8 @@ class ClusterLoader(torch.utils.data.DataLoader):
                          **kwargs)
 
     def __collate__(self, batch):
+        from torch_sparse import cat
+
         if not isinstance(batch, torch.Tensor):
             batch = torch.tensor(batch)
 

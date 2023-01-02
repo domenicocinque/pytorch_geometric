@@ -2,10 +2,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from torch import Tensor
-from torch_sparse import SparseTensor
 
 from torch_geometric.data.data import BaseData
 from torch_geometric.data.storage import BaseStorage
+from torch_geometric.typing import SparseTensor
 
 
 def separate(cls, batch: BaseData, idx: int, slice_dict: Any,
@@ -90,12 +90,14 @@ def _separate(
 
     elif (isinstance(value, Sequence) and isinstance(value[0], Sequence)
           and not isinstance(value[0], str) and len(value[0]) > 0
-          and isinstance(value[0][0], (Tensor, SparseTensor))):
+          and isinstance(value[0][0], (Tensor, SparseTensor))
+          and isinstance(slices, Sequence)):
         # Recursively separate elements of lists of lists.
         return [elem[idx] for elem in value]
 
     elif (isinstance(value, Sequence) and not isinstance(value, str)
-          and isinstance(value[0], (Tensor, SparseTensor))):
+          and isinstance(value[0], (Tensor, SparseTensor))
+          and isinstance(slices, Sequence)):
         # Recursively separate elements of lists of Tensors/SparseTensors.
         return [
             _separate(key, elem, idx, slices[i],
